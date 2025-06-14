@@ -961,14 +961,15 @@ def _parse_chat_message_content_mm_part(
     """
     assert isinstance(
         part, dict)  # This is needed to avoid mypy errors: part.get() from str
-    part_type = part.get("type", None)
+    part_dict = cast(dict[str, Any], part)
+    part_type = part_dict.get("type", None)
 
     if isinstance(part_type, str) and part_type in MM_PARSER_MAP:
-        content = MM_PARSER_MAP[part_type](part)
+        content = MM_PARSER_MAP[part_type](part_dict)
 
         # Special case for 'image_url.detail'
         # We only support 'auto', which is the default
-        if part_type == "image_url" and part.get("detail", "auto") != "auto":
+        if part_type == "image_url" and part_dict.get("detail", "auto") != "auto":
             logger.warning("'image_url.detail' is currently not supported "
                            "and will be ignored.")
 
@@ -977,20 +978,20 @@ def _parse_chat_message_content_mm_part(
     # Handle missing 'type' but provided direct URL fields.
     # 'type' is required field by pydantic
     if part_type is None:
-        if part.get("image_url") is not None:
+        if part_dict.get("image_url") is not None:
             image_params = cast(CustomChatCompletionContentSimpleImageParam,
-                                part)
+                                part_dict)
             return "image_url", image_params.get("image_url", "")
-        if part.get("audio_url") is not None:
+        if part_dict.get("audio_url") is not None:
             audio_params = cast(CustomChatCompletionContentSimpleAudioParam,
-                                part)
+                                part_dict)
             return "audio_url", audio_params.get("audio_url", "")
-        if part.get("input_audio") is not None:
-            input_audio_params = cast(dict[str, str], part)
+        if part_dict.get("input_audio") is not None:
+            input_audio_params = cast(dict[str, str], part_dict)
             return "input_audio", input_audio_params
-        if part.get("video_url") is not None:
+        if part_dict.get("video_url") is not None:
             video_params = cast(CustomChatCompletionContentSimpleVideoParam,
-                                part)
+                                part_dict)
             return "video_url", video_params.get("video_url", "")
         # Raise an error if no 'type' or direct URL is found.
         raise ValueError("Missing 'type' field in multimodal part.")
