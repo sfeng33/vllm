@@ -37,6 +37,7 @@ from vllm.v1.request import RequestStatus
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 Transfer = tuple[int, float]  # (xfer_handle, start_time)
@@ -190,9 +191,10 @@ class NixlConnector(KVConnectorBase_V1):
     ############################################################
     # Worker Side Methods
     ############################################################
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor],
+                          kv_cache_config: Optional["KVCacheConfig"] = None):
         assert self.connector_worker is not None
-        self.connector_worker.register_kv_caches(kv_caches)
+        self.connector_worker.register_kv_caches(kv_caches, kv_cache_config)
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         assert self.connector_worker is not None
@@ -683,11 +685,42 @@ class NixlConnectorWorker:
 
         fut.add_done_callback(request_ready)
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor],
+                          kv_cache_config: Optional["KVCacheConfig"] = None):
         """Register the KV Cache data in nixl."""
+        
+        logger.info("NixlConnectorWorker.register_kv_caches called with %d layers", 
+                   len(kv_caches))
+        
+        # Log unique tensor information to validate assumption of shared physical memory
+        unique_tensor_objects = set()
+        unique_storage_ptrs = set()
+        storage_to_layers = {}
+        
+        for layer_name, tensor in kv_caches.items():
+            # Track Python objects (views)
+            unique_tensor_objects.add(id(tensor))
+            
+            # Track actual physical memory
+            storage_ptr = tensor.storage().data_ptr()
+            unique_storage_ptrs.add(storage_ptr)
+            
+            # Map storage to layers for debugging
+            if storage_ptr not in storage_to_layers:
+                storage_to_layers[storage_ptr] = []
+            storage_to_layers[storage_ptr].append(layer_name)
+        
+        logger.info("KV cache memory analysis:")
+        logger.info("  - %d unique tensor view objects (one per layer)", 
+                   len(unique_tensor_objects))
+        logger.info("  - %d unique physical memory buffers (expected: ~5 for shared allocation)", 
+                   len(unique_storage_ptrs))  
 
         _, first_kv_cache = next(iter(kv_caches.items()))
         kv_elem_size = first_kv_cache.element_size()
+        
+        logger.debug("First KV cache shape: %s, element size: %d bytes",
+                    first_kv_cache.shape, kv_elem_size)
 
         if self.use_host_buffer:
             self.initialize_host_xfer_buffer(kv_caches=kv_caches)
@@ -751,6 +784,8 @@ class NixlConnectorWorker:
         # hybrid attn, etc
         # block size in bytes
         self.block_len = kv_elem_size * math.prod(block_shape)
+        
+        # Enhanced logging for hybrid allocator compatibility
         logger.info(
             "Registering KV_Caches. use_mla: %s, kv_buffer_device: %s, "
             "use_host_buffer: %s, num_blocks: %s, block_shape: %s, "
@@ -770,21 +805,43 @@ class NixlConnectorWorker:
         # (roughly 8KB vs 5KB).
         # Conversely for FlashInfer, K and V are transferred in the same tensor
         # to better exploit the memory layout (ie num_blocks is the first dim).
-        for cache_or_caches in xfer_buffers.values():
+        
+        # IMPORTANT: We only register each unique physical memory region once.
+        # Multiple layers may share the same underlying memory (via tensor views),
+        # so we deduplicate based on physical memory address to avoid redundant
+        # NIXL registrations and reduce metadata size.
+        seen_addresses = set()
+        unique_cache_count = 0
+        
+        for layer_idx, (layer_name, cache_or_caches) in enumerate(xfer_buffers.items()):
             # Normalize to always be a list of caches
             cache_list = [cache_or_caches] if use_mla \
                          or self._use_pallas_v1 or self._use_flashinfer \
                          else cache_or_caches
             for cache in cache_list:
                 base_addr = cache.data_ptr()
-                region_len = self.num_blocks * self.block_len
-                # NOTE: use tp_rank for device_id since multi-node TP
-                # is rarely used.
-                caches_data.append((base_addr, region_len, self.tp_rank, ""))
-                kv_caches_base_addr.append(base_addr)
+                
+                # Only register if we haven't seen this physical address before
+                if base_addr not in seen_addresses:
+                    seen_addresses.add(base_addr)
+                    region_len = self.num_blocks * self.block_len
+                    # NOTE: use tp_rank for device_id since multi-node TP
+                    # is rarely used.
+                    caches_data.append((base_addr, region_len, self.tp_rank, ""))
+                    kv_caches_base_addr.append(base_addr)
+                    unique_cache_count += 1
+                    logger.debug("Registered unique memory region %d at %s for layer %s",
+                               unique_cache_count, hex(base_addr), layer_name)
+                else:
+                    logger.debug("Skipping duplicate memory at %s for layer %s",
+                               hex(base_addr), layer_name)
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
         self.num_layers = len(xfer_buffers.keys())
+        
+        logger.info("Memory registration summary: %d unique regions registered "
+                   "(deduplicated from %d layer entries)", 
+                   len(caches_data), len(xfer_buffers))
 
         # TODO(mgoin): remove this once we have hybrid memory allocator
         # Optimization for models with local attention (Llama 4)
@@ -827,7 +884,7 @@ class NixlConnectorWorker:
                 # (addr, len, device id)
                 # TODO: does device_id matter to DRAM?
                 blocks_data.append((addr, self.block_len, self.tp_rank))
-        logger.debug("Created %s blocks for src engine %s and rank %s",
+        logger.info("Created %s blocks for src engine %s and rank %s",
                      len(blocks_data), self.engine_id, self.tp_rank)
 
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data,
