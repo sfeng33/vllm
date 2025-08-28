@@ -467,9 +467,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
-                mm_kwargs=new_req_data.mm_kwargs,
-                mm_positions=new_req_data.mm_positions,
-                mm_hashes=new_req_data.mm_hashes,
+                mm_features=new_req_data.mm_features,
                 sampling_params=sampling_params,
                 pooling_params=pooling_params,
                 generator=generator,
@@ -585,8 +583,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         second_per_grid_ts = []
         audio_feature_lengths = []
         use_audio_in_video = False
-        for mm_item in req_state.mm_kwargs:
-            mm_input = mm_item.get_data()
+        for mm_feature in (req_state.mm_features or []):
+            if not mm_feature.data:
+                continue
+            mm_input = mm_feature.data.get_data()
             if (t := mm_input.get("image_grid_thw")) is not None:
                 image_grid_thw.append(t.tolist())
             if (t := mm_input.get("video_grid_thw")) is not None:
@@ -618,7 +618,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         mm_kwargs = list[MultiModalKwargsItem]()
         for req in scheduler_output.scheduled_new_reqs:
-            mm_kwargs.extend(req.mm_kwargs)
+            if req.mm_features:
+                mm_kwargs.extend([f.data for f in req.mm_features if f.data])
 
         # Input all modalities at once
         mm_kwargs_combined: BatchedTensorInputs = {}
@@ -1140,10 +1141,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
 
             for mm_input_id in encoder_input_ids:
-                mm_hash = req_state.mm_hashes[mm_input_id]
-                mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
+                mm_feature = req_state.mm_features[mm_input_id]
+                mm_kwargs.append(mm_feature.data)
                 mm_hashes_pos.append(
-                    (mm_hash, req_state.mm_positions[mm_input_id]))
+                    (mm_feature.identifier, mm_feature.mm_position))
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
@@ -1195,11 +1196,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = \
                 req_state.num_computed_tokens + shift_computed_tokens
-            mm_positions = req_state.mm_positions
-            mm_hashes = req_state.mm_hashes
-            for i, pos_info in enumerate(mm_positions):
-                start_pos = pos_info.offset
-                num_encoder_tokens = pos_info.length
+            mm_features = req_state.mm_features
+            for i, feature in enumerate(mm_features):
+                start_pos = feature.mm_position.offset
+                num_encoder_tokens = feature.mm_position.length
 
                 # The encoder output is needed if the two ranges overlap:
                 # [num_computed_tokens,
@@ -1220,7 +1220,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
                 assert start_idx < end_idx
 
-                mm_hash = mm_hashes[i]
+                mm_hash = feature.identifier
                 encoder_output = self.encoder_cache.get(mm_hash, None)
                 assert encoder_output is not None,\
                     f"Encoder cache miss for {mm_hash}."

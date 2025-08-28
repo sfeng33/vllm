@@ -704,18 +704,18 @@ class Scheduler(SchedulerInterface):
         if num_new_tokens == 0 or not request.has_encoder_inputs:
             return [], num_new_tokens, encoder_compute_budget
         encoder_inputs_to_schedule: list[int] = []
-        mm_positions = request.mm_positions
-        assert mm_positions is not None
-        assert len(mm_positions) > 0
+        mm_features = request.mm_features
+        assert mm_features is not None
+        assert len(mm_features) > 0
 
         # NOTE: since scheduler operates on the request level (possibly with
         # multiple encoder inputs per request), we need to create temporary
         # trackers for accounting at the encoder input level.
         mm_hashes_to_schedule = set()
         num_tokens_to_schedule = 0
-        for i, pos_info in enumerate(mm_positions):
-            start_pos = pos_info.offset
-            num_encoder_tokens = pos_info.length
+        for i, feature in enumerate(mm_features):
+            start_pos = feature.mm_position.offset
+            num_encoder_tokens = feature.mm_position.length
 
             # The encoder output is needed if the two ranges overlap:
             # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
@@ -745,7 +745,7 @@ class Scheduler(SchedulerInterface):
 
             # The same encoder input has already been scheduled in the current
             # step.
-            if request.mm_hashes[i] in mm_hashes_to_schedule:
+            if feature.identifier in mm_hashes_to_schedule:
                 continue
 
             if self.encoder_cache_manager.check_and_update_cache(request, i):
@@ -784,7 +784,7 @@ class Scheduler(SchedulerInterface):
 
             num_tokens_to_schedule += num_encoder_tokens
             encoder_compute_budget -= num_encoder_tokens
-            mm_hashes_to_schedule.add(request.mm_hashes[i])
+            mm_hashes_to_schedule.add(feature.identifier)
             encoder_inputs_to_schedule.append(i)
 
         return (
@@ -1012,9 +1012,9 @@ class Scheduler(SchedulerInterface):
         # Here, we use list(set) to avoid modifying the set while iterating
         # over it.
         for input_id in list(cached_encoder_input_ids):
-            mm_positions = request.mm_positions[input_id]
-            start_pos = mm_positions.offset
-            num_tokens = mm_positions.length
+            mm_feature = request.mm_features[input_id]
+            start_pos = mm_feature.mm_position.offset
+            num_tokens = mm_feature.mm_position.length
             if start_pos + num_tokens <= request.num_computed_tokens:
                 # The encoder output is already processed and stored
                 # in the decoder's KV cache.

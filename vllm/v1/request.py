@@ -89,11 +89,6 @@ class Request:
         self.mm_features = mm_features or []
         self.num_encoder_inputs = len(self.mm_features)
         self.has_encoder_inputs = self.num_encoder_inputs > 0
-        # TODO(sfeng33): Remove these legacy fields after clearing out all
-        # references in scheduler and model runner
-        self.mm_positions = [f.mm_position for f in self.mm_features]
-        self.mm_kwargs = [f.data for f in self.mm_features]
-        self.mm_hashes = [f.identifier for f in self.mm_features]
 
         # Read-only views
         # Prevent directly appending to these lists since
