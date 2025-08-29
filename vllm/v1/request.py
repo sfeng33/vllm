@@ -171,8 +171,8 @@ class Request:
         return RequestStatus.get_finished_reason(self.status)
 
     def get_num_encoder_tokens(self, input_id: int) -> int:
-        assert input_id < len(self.mm_positions)
-        num_tokens = self.mm_positions[input_id].length
+        assert input_id < len(self.mm_features)
+        num_tokens = self.mm_features[input_id].mm_position.length
         return num_tokens
 
     def record_event(

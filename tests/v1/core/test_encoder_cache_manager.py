@@ -1,16 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange, MultiModalKwargsItem
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 
 
 # ------------------ Mock Classes ------------------ #
+class MockMultiModalFeatureSpec:
+    def __init__(self, identifier: str, token_count: int):
+        self.identifier = identifier
+        self.mm_position = PlaceholderRange(offset=0, length=token_count)
+
+
 class MockRequest:
 
     def __init__(self, request_id, mm_hashes, token_counts):
         self.request_id = request_id
         self.mm_hashes = mm_hashes
         self._token_counts = token_counts
+        # Create mock mm_features based on mm_hashes and token_counts
+        self.mm_features = []
+        for i, (mm_hash, token_count) in enumerate(zip(mm_hashes, token_counts)):
+            feature = MockMultiModalFeatureSpec(mm_hash, token_count)
+            self.mm_features.append(feature)
 
     def get_num_encoder_tokens(self, input_id: int) -> int:
         return self._token_counts[input_id]

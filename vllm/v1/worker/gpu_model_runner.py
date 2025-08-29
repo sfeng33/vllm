@@ -1225,7 +1225,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 assert encoder_output is not None,\
                     f"Encoder cache miss for {mm_hash}."
 
-                if (is_embed := pos_info.is_embed) is not None:
+                if (is_embed := feature.mm_position.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
 
                 mm_embeds_item = gather_mm_placeholders(
