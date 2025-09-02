@@ -9,7 +9,13 @@ class MockRequest:
 
     def __init__(self, request_id, mm_hashes, token_counts):
         self.request_id = request_id
-        self.mm_hashes = mm_hashes
+        # Create mock mm_features with identifier field
+        self.mm_features = []
+        for i, mm_hash in enumerate(mm_hashes):
+            class MockFeature:
+                def __init__(self, identifier):
+                    self.identifier = identifier
+            self.mm_features.append(MockFeature(mm_hash))
         self._token_counts = token_counts
 
     def get_num_encoder_tokens(self, input_id: int) -> int:
