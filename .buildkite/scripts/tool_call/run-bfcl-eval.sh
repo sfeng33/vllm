@@ -44,6 +44,7 @@ MAX_MODEL_LEN="${BFCL_MAX_MODEL_LEN:-4096}"
 PORT="${BFCL_PORT:-8000}"
 REASONING_PARSER="${BFCL_REASONING_PARSER:-}"
 EXTRA_ARGS="${BFCL_EXTRA_ARGS:-}"
+TOOL_CHOICE="${BFCL_TOOL_CHOICE:-}"
 
 # Set up output directory
 if [ -n "$OUTPUT_DIR" ]; then
@@ -63,6 +64,7 @@ echo "TP size:        $TP_SIZE"
 echo "Max model len:  $MAX_MODEL_LEN"
 echo "Port:           $PORT"
 echo "Num threads:    $NUM_THREADS"
+echo "Tool choice:    ${TOOL_CHOICE:-<default>}"
 echo "============================================"
 
 # ---- Install bfcl-eval if missing ----
@@ -139,7 +141,7 @@ echo "vLLM server is ready. (started in ${SECONDS_WAITED}s)"
 # be patched in-process so BFCL knows to use the OpenAI-compatible handler
 # against our local vLLM server.
 bfcl_exit_code=0
-python3 - "$MODEL" "$TEST_CATEGORY" "$NUM_THREADS" "$PORT" "$API_TYPE" "$OUTPUT_DIR" << 'PYEOF' || bfcl_exit_code=$?
+python3 - "$MODEL" "$TEST_CATEGORY" "$NUM_THREADS" "$PORT" "$API_TYPE" "$OUTPUT_DIR" "$TOOL_CHOICE" << 'PYEOF' || bfcl_exit_code=$?
 import os
 import sys
 
@@ -149,6 +151,7 @@ num_threads = int(sys.argv[3])
 port = sys.argv[4]
 api_type = sys.argv[5]
 output_dir = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] else os.getcwd()
+tool_choice = sys.argv[7] if len(sys.argv) > 7 and sys.argv[7] else ""
 
 os.environ["OPENAI_BASE_URL"] = f"http://localhost:{port}/v1"
 os.environ["OPENAI_API_KEY"] = "dummy"
@@ -184,6 +187,17 @@ bfcl_model_config.MODEL_CONFIG_MAPPING[model] = ModelConfig(
 from bfcl_eval.__main__ import evaluate, generate
 import inspect
 import typer
+
+# Monkey-patch handler to inject tool_choice into API requests
+if tool_choice:
+    _orig_gen = handler.generate_with_backoff
+
+    def _patched_gen(self, **kwargs):
+        if "tools" in kwargs:
+            kwargs["tool_choice"] = tool_choice
+        return _orig_gen(self, **kwargs)
+
+    handler.generate_with_backoff = _patched_gen
 
 
 def _get_default_kwargs(function):
