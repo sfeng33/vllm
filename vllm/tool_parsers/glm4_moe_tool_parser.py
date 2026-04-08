@@ -37,21 +37,9 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.utils import partial_tag_overlap
 
 logger = init_logger(__name__)
-
-
-def _partial_tag_overlap(text: str, tag: str) -> int:
-    """Length of the longest prefix of *tag* that matches a suffix of *text*.
-
-    E.g. text ending in ``"<tool_"`` returns 6 when tag is ``"<tool_call>"``.
-    Returns 0 when there is no overlap.
-    """
-    max_check = min(len(tag) - 1, len(text))
-    for k in range(max_check, 0, -1):
-        if text.endswith(tag[:k]):
-            return k
-    return 0
 
 
 class Glm4MoeModelToolParser(ToolParser):
@@ -253,7 +241,7 @@ class Glm4MoeModelToolParser(ToolParser):
             if start == -1:
                 # No more tool calls — send up to (len - partial-tag overlap)
                 tail = current_text[pos:]
-                overlap = _partial_tag_overlap(tail, self.tool_call_start_token)
+                overlap = partial_tag_overlap(tail, self.tool_call_start_token)
                 sendable = tail[: len(tail) - overlap] if overlap else tail
                 if sendable:
                     content_segments.append(sendable)
@@ -297,7 +285,7 @@ class Glm4MoeModelToolParser(ToolParser):
             else:
                 # Incomplete tool call — strip partial </tool_call> suffix
                 raw = text[inner_start:]
-                overlap = _partial_tag_overlap(raw, self.tool_call_end_token)
+                overlap = partial_tag_overlap(raw, self.tool_call_end_token)
                 if overlap:
                     raw = raw[:-overlap]
                 results.append((raw, False))
@@ -373,7 +361,7 @@ class Glm4MoeModelToolParser(ToolParser):
                 partial_content = inner_text[partial_content_start:]
 
                 # Hold back any partial </arg_value> suffix
-                overlap = _partial_tag_overlap(partial_content, self.arg_val_end)
+                overlap = partial_tag_overlap(partial_content, self.arg_val_end)
                 if overlap:
                     partial_content = partial_content[:-overlap]
 
