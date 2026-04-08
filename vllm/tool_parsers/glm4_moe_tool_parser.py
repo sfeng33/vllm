@@ -366,7 +366,19 @@ class Glm4MoeModelToolParser(ToolParser):
                     partial_content = partial_content[:-overlap]
 
                 key_json = json.dumps(partial_key, ensure_ascii=False)
-                if self._is_string_type(tool_name, partial_key, self.tools):
+                if is_complete:
+                    # Tool call finished but </arg_value> is missing
+                    # (malformed output). Treat partial as complete value
+                    # so the diff naturally closes any open quotes.
+                    if self._is_string_type(tool_name, partial_key, self.tools):
+                        val_json = json.dumps(partial_content, ensure_ascii=False)
+                    else:
+                        val_json = json.dumps(
+                            self._deserialize(partial_content.strip()),
+                            ensure_ascii=False,
+                        )
+                    parts.append(f"{key_json}: {val_json}")
+                elif self._is_string_type(tool_name, partial_key, self.tools):
                     escaped = self._json_escape_string_content(partial_content)
                     # Open quote but no close — more content may arrive
                     parts.append(f'{key_json}: "{escaped}')
@@ -379,11 +391,6 @@ class Glm4MoeModelToolParser(ToolParser):
 
         joined = "{" + ", ".join(parts)
         if is_complete:
-            # If a partial string value left an open quote, close it.
-            # This can happen when </arg_value> and </tool_call> arrive
-            # together and the regex doesn't match the pair.
-            if has_partial_value:
-                joined += '"'
             joined += "}"
         return joined
 
