@@ -3,9 +3,11 @@
 
 import asyncio
 import json
+import logging as stdlib_logging
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from datetime import datetime, timezone
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Final
 
@@ -77,6 +79,61 @@ if TYPE_CHECKING:
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
 logger = init_logger(__name__)
+
+_diagnostic_logger: stdlib_logging.Logger | None = None
+_diagnostic_logger_initialized = False
+
+
+def _get_diagnostic_logger() -> stdlib_logging.Logger | None:
+    global _diagnostic_logger, _diagnostic_logger_initialized
+    if _diagnostic_logger_initialized:
+        return _diagnostic_logger
+    _diagnostic_logger_initialized = True
+
+    from vllm import envs
+
+    log_path = envs.VLLM_TOOL_CALL_DIAGNOSTIC_LOG
+    if not log_path:
+        return None
+
+    diag_logger = stdlib_logging.getLogger("vllm.tool_call_diagnostic")
+    diag_logger.setLevel(stdlib_logging.INFO)
+    diag_logger.propagate = False
+    handler = stdlib_logging.FileHandler(log_path, mode="a")
+    handler.setFormatter(stdlib_logging.Formatter("%(message)s"))
+    diag_logger.addHandler(handler)
+    _diagnostic_logger = diag_logger
+    return _diagnostic_logger
+
+
+def _log_tool_call_diagnostic(
+    request_id: str,
+    parser_type: str,
+    tool_parser_name: str | None,
+    raw_model_output: str,
+    finish_reason: str | None,
+    parsed_tool_calls: list | None,
+    parsed_content: str | None,
+    tools_called: bool,
+) -> None:
+    diag_logger = _get_diagnostic_logger()
+    if diag_logger is None:
+        return
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "request_id": request_id,
+        "parser_type": parser_type,
+        "tool_parser_name": tool_parser_name or "",
+        "raw_model_output": raw_model_output,
+        "finish_reason": finish_reason or "",
+        "parsed_tool_calls": [
+            {"name": tc.function.name, "arguments": tc.function.arguments}
+            for tc in (parsed_tool_calls or [])
+        ],
+        "parsed_content": parsed_content,
+        "tools_called": tools_called,
+    }
+    diag_logger.info(json.dumps(record, ensure_ascii=False))
 
 
 class OpenAIServingChat(OpenAIServing):
@@ -1086,17 +1143,18 @@ class OpenAIServingChat(OpenAIServing):
                         content=content,
                     )
 
+                harmony_finish_reason = (
+                    "tool_calls"
+                    if (tool_call_info is not None and tool_call_info.tools_called)
+                    else output.finish_reason
+                    if output.finish_reason
+                    else "stop"
+                )
                 choice_data = ChatCompletionResponseChoice(
                     index=output.index,
                     message=message,
                     logprobs=logprobs,
-                    finish_reason=(
-                        "tool_calls"
-                        if (tool_call_info is not None and tool_call_info.tools_called)
-                        else output.finish_reason
-                        if output.finish_reason
-                        else "stop"
-                    ),
+                    finish_reason=harmony_finish_reason,
                     stop_reason=output.stop_reason,
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
@@ -1107,8 +1165,37 @@ class OpenAIServingChat(OpenAIServing):
                         else None
                     ),
                 )
+                if _get_diagnostic_logger() is not None:
+                    _log_tool_call_diagnostic(
+                        request_id=request_id,
+                        parser_type="harmony",
+                        tool_parser_name=(
+                            self.tool_parser.__name__
+                            if self.tool_parser is not None
+                            else None
+                        ),
+                        raw_model_output=(
+                            tokenizer.decode(list(token_ids))
+                            if tokenizer is not None
+                            else "<no tokenizer>"
+                        ),
+                        finish_reason=harmony_finish_reason,
+                        parsed_tool_calls=(
+                            tool_call_info.tool_calls
+                            if tool_call_info is not None
+                            else None
+                        ),
+                        parsed_content=content,
+                        tools_called=(
+                            tool_call_info.tools_called
+                            if tool_call_info is not None
+                            else False
+                        ),
+                    )
                 choices.append(choice_data)
                 continue
+
+            raw_model_output_text = output.text
 
             if reasoning_parser:
                 # If the reasoning parser is enabled,
@@ -1334,6 +1421,26 @@ class OpenAIServingChat(OpenAIServing):
                 ),
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
+
+            if _get_diagnostic_logger() is not None:
+                _log_tool_call_diagnostic(
+                    request_id=request_id,
+                    parser_type="text",
+                    tool_parser_name=(
+                        self.tool_parser.__name__
+                        if self.tool_parser is not None
+                        else None
+                    ),
+                    raw_model_output=raw_model_output_text or "",
+                    finish_reason=choice_data.finish_reason,
+                    parsed_tool_calls=(
+                        list(choice_data.message.tool_calls)
+                        if choice_data.message.tool_calls
+                        else None
+                    ),
+                    parsed_content=choice_data.message.content,
+                    tools_called=bool(choice_data.message.tool_calls),
+                )
 
             choices.append(choice_data)
 

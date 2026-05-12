@@ -53,6 +53,9 @@ if [ -n "$OUTPUT_DIR" ]; then
     OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 fi
 
+# Enable tool call diagnostic logging for raw vs parsed comparison
+export VLLM_TOOL_CALL_DIAGNOSTIC_LOG="${OUTPUT_DIR:-.}/vllm_tool_call_diagnostic.jsonl"
+
 echo "============================================"
 echo "BFCL Tool Call Correctness Evaluation"
 echo "============================================"
@@ -166,10 +169,26 @@ from bfcl_eval.model_handler.api_inference.openai_response import (
     OpenAIResponsesHandler,
 )
 
+
+class DiagnosticOpenAICompletionsHandler(OpenAICompletionsHandler):
+    """Captures extra diagnostic data from the API response."""
+
+    def _parse_query_response_FC(self, api_response):
+        result = super()._parse_query_response_FC(api_response)
+        choice = api_response.choices[0]
+        result["finish_reason"] = choice.finish_reason
+        result["message_content"] = choice.message.content
+        try:
+            result["raw_api_response"] = api_response.model_dump()
+        except Exception:
+            result["raw_api_response"] = str(api_response)
+        return result
+
+
 if api_type == "responses":
     handler = OpenAIResponsesHandler
 else:
-    handler = OpenAICompletionsHandler
+    handler = DiagnosticOpenAICompletionsHandler
 
 bfcl_model_config.MODEL_CONFIG_MAPPING[model] = ModelConfig(
     model_name=model,
@@ -208,6 +227,7 @@ gen_kwargs["test_category"] = [c.strip() for c in test_category.split(",")]
 gen_kwargs["skip_server_setup"] = True
 gen_kwargs["num_threads"] = num_threads
 gen_kwargs["temperature"] = temperature
+gen_kwargs["include_input_log"] = True
 generate(**gen_kwargs)
 
 # ---- evaluate ----
@@ -218,6 +238,45 @@ eval_kwargs["test_category"] = [c.strip() for c in test_category.split(",")]
 evaluate(**eval_kwargs)
 
 print("=== BFCL evaluation completed successfully ===")
+
+# ---- Run failure analysis ----
+print("=== Running diagnostic failure analysis ===")
+from pathlib import Path
+import subprocess
+
+result_path = Path(output_dir) / "result"
+score_path = Path(output_dir) / "score"
+report_path = Path(output_dir) / "diagnostic_report.json"
+
+# Find the analysis script relative to the repo root
+repo_root = Path(os.getcwd())
+analysis_script = (
+    repo_root / ".buildkite" / "scripts"
+    / "tool_call" / "analyze-bfcl-failures.py"
+)
+
+if result_path.exists() and score_path.exists():
+    try:
+        cmd = [
+            sys.executable, str(analysis_script),
+            "--result-dir", str(result_path),
+            "--score-dir", str(score_path),
+            "--output", str(report_path),
+        ]
+        diag_log = os.environ.get(
+            "VLLM_TOOL_CALL_DIAGNOSTIC_LOG", ""
+        )
+        if diag_log and Path(diag_log).exists():
+            cmd.extend(["--diagnostic-log", diag_log])
+        subprocess.run(cmd, check=False)
+    except Exception as e:
+        print(f"Warning: diagnostic analysis failed: {e}")
+else:
+    print(
+        "Skipping analysis: result or score dir "
+        f"not found in {output_dir}"
+    )
+print("=== Diagnostic analysis completed ===")
 PYEOF
 
 # ---- Upload results to buildkite ----
@@ -247,6 +306,12 @@ EOF
     if [ -d "$RESULTS_ROOT/score" ]; then
         buildkite-agent artifact upload "$RESULTS_ROOT/score/**/*"
     fi
+    # Upload diagnostic artifacts
+    for f in diagnostic_report.json vllm_tool_call_diagnostic.jsonl; do
+        if [ -f "$RESULTS_ROOT/$f" ]; then
+            buildkite-agent artifact upload "$RESULTS_ROOT/$f"
+        fi
+    done
 fi
 
 exit $bfcl_exit_code
